@@ -13,8 +13,9 @@ from instructor_auth import verify_instructor_role
 import protocol
 import events
 
-# Mert'in Veritabanı Modülü (Placeholder)
+# Mert'in Veritabanı Modülü
 import db_manager
+db_manager.init_db()
 
 # ---------------------------------------------------------
 # EKLENDİ (ÖZELLİK 3): JSONL FORMATINDA DOSYAYA LOGLAMA
@@ -28,6 +29,7 @@ def log_event(event_type, details):
     }
     with open("sinav_raporu_merkezi.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry) + "\n")
+    db_manager.log_audit(event_type, "system", "", details, "OK")
 
 # 1) HAFIZA VE DURUM YÖNETİMİ
 active_students = {}
@@ -143,7 +145,7 @@ async def handle_client(websocket):
                 active_students[student_id]["last_msg_time"] = now
 
             if action == "register_exam": # EĞİTMENİN YENİ SINAV KAYIT KOMUTU
-                # 🛡️ QWEN FIX: Eğitmen Token Kontrolü (Doğru Kullanım)
+                #  FIX: Eğitmen Token Kontrolü (Doğru Kullanım)
                 ok, err = verify_instructor_role(data, "register_exam")
                 if not ok: 
                     print(f"🚫 [GÜVENLİK İHLALİ] Yetkisiz sınav oluşturma girişimi REDDEDİLDİ! Sebep: {err}")
@@ -152,12 +154,13 @@ async def handle_client(websocket):
 
                 exam_id = data["payload"]["exam_id"]
                 exam_registry[exam_id] = data["payload"]
-                print(f"\n✅ [EĞİTMEN] Yeni Sınav Aktif Edildi: {exam_id}") 
+                db_manager.create_exam_session(exam_id, data["payload"])
+                print(f"\n✅ [EĞİTMEN] Yeni Sınav Aktif Edildi: {exam_id}")
                 log_event("exam_registered", {"exam_id": exam_id})
                 await websocket.send(json.dumps({"status": "exam_registered"}))
 
             elif action == "resume_student": # EĞİTMENİN KOPAN ÖĞRENCİYİ AFFETME KOMUTU
-                #  QWEN FIX: Eğitmen Token Kontrolü (Doğru Kullanım)
+                #   FIX: Eğitmen Token Kontrolü (Doğru Kullanım)
                 ok, err = verify_instructor_role(data, "resume_student")
                 if not ok:
                     print(f"🚫 [GÜVENLİK İHLALİ] Öğrenci affetme yetkisi reddedildi! Sebep: {err}")
@@ -171,6 +174,19 @@ async def handle_client(websocket):
                     log_event("student_resumed", {"student_id": hedef_id})
 
             elif action == "request_start_exam": # ÖĞRENCİNİN SINAVA BAŞLAMA TALEBİ
+
+                # --- GERİ EKLENDİ: ESKİ SÜRÜM KONTROLÜ ---
+                eski_surum_mu = False
+                client_sig = data.pop("auth_signature", None)
+                if client_sig:
+                    msg_str = json.dumps(data, sort_keys=True)
+                    if not verify_signature(msg_str, client_sig):
+                        await websocket.send(json.dumps({"status": "error", "message": "Güvenlik İhlali: Mesaj İmzası Geçersiz!"}))
+                        continue
+                else:
+                    print("\n⚠️ [UYARI] Eski sürüm bir istemci bağlanıyor (İmza Yok). Güvenlik seviyesi: DÜŞÜK")
+                    eski_surum_mu = True
+                # ----------------------------------------
 
                 client_sig = data.pop("auth_signature", None)
                 if client_sig:
@@ -208,10 +224,12 @@ async def handle_client(websocket):
                             print(f"\n🔄 [CRASH RECOVERY] Sunucu çökmesi sonrası {student_id} başarıyla kurtarıldı!")
                             log_event("crash_recovery_reconnect", {"student_id": student_id})
                             await websocket.send(json.dumps({
-                                "action": "exam_started_ack", "status": "success", 
-                                "session_token": active_students[student_id]["session_token"],
-                                "reconnected": True, "time_left_seconds": active_students[student_id]["time_left"]
-                            }))
+                            "action": "exam_started_ack", "status": "success", 
+                            "session_token": active_students[student_id]["session_token"],
+                            "reconnected": True, "time_left_seconds": active_students[student_id]["time_left"],
+                            # YENİ EKLENEN SATIR
+                            "warning": "⚠️ DİKKAT: Eski sürüm (şifresiz) bir istemci kullanıyorsunuz!" if eski_surum_mu else None
+                        }))
                             continue
                         else:
                             await websocket.send(json.dumps({"status": "error", "message": f"HATA: Zaten '{mevcut_sinav}' sınavındasınız!"}))
@@ -241,16 +259,20 @@ async def handle_client(websocket):
                 duration_mins = 40
                 session_token = get_expected_server_token(student_id)
 
-                active_students[student_id] = {  
+                active_students[student_id] = {
                     "ws": websocket, "state": "in_progress", "session_token": session_token,
                     "exam_id": exam_id, "time_left": duration_mins * 60,
                     "login_id": login_id, "password_hash": gelen_hash, "credential_sig": credential_sig
                 }
-                
+                db_manager.record_student_connection(student_id, exam_id, session_token, login_id)
+
+                log_event("exam_started", {"student_id": student_id, "exam_id": exam_id})
                 log_event("exam_started", {"student_id": student_id, "exam_id": exam_id})
                 await websocket.send(json.dumps({
                     "action": "exam_started_ack", "status": "success", "session_token": session_token,
-                    "reconnected": False, "total_duration_minutes": duration_mins 
+                    "reconnected": False, "total_duration_minutes": duration_mins,
+                    # YENİ EKLENEN SATIR
+                    "warning": "⚠️ DİKKAT: Eski sürüm (şifresiz) bir istemci kullanıyorsunuz!" if eski_surum_mu else None
                 }))
 
             elif action == "status_update":
@@ -301,8 +323,12 @@ async def handle_client(websocket):
                         print(f"   ↳ Sebep: {v_type} | Pencere: {aktif_pencere}")
                         print(f"   ↳ Arka Plan: {', '.join(acik_uygulamalar)}")
                         
-                        # 🛡️ Mert'in veritabanı modülüne kopyayı (violation) yolla
+                        # Mert'in veritabanı modülüne kopyayı (violation) yolla
                         db_manager.save_violation_to_db(student_id, v_type, aktif_pencere, yeni_skor)
+                        db_manager.record_monitoring_event(student_id, "VIOLATION", {
+                            "type": v_type, "window": aktif_pencere,
+                            "apps": acik_uygulamalar, "score": yeni_skor
+                        }, "CRITICAL")
  
             elif action == "get_dashboard_data":
                 dashboard_counter += 1
@@ -334,4 +360,5 @@ async def handle_client(websocket):
                     info["state"] = "completed" if info.get("time_left", 1) <= 0 else "disconnected_paused"
                     log_event("student_disconnected", {"student_id": sid})
                     print(f"\n🔌 [KOPTU] Öğrenci {sid} hattan düştü. Durumu donduruldu.")
+                db_manager.record_student_disconnect(sid)
                 break

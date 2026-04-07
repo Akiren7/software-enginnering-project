@@ -1,0 +1,22 @@
+# ASLA OKUMAMASI GEREKEN DEV KLASÖRLER (Para Canavarları)
+node_modules/
+venv/
+.git/
+__pycache__/
+.ipynb_checkpoints/
+
+# SADECE İSİMLERİNİ GÖREBİLECEĞİ AĞIR DOSYALAR
+*.pdf
+*.zip
+*.exe
+*.png
+*.jpg
+*.jpeg
+
+# DERLEME ÇIKTILARI (Okumasına gerek yok)
+dist/
+build/
+demo.spec
+
+# GİZLİ VERİLER (Güvenlik için)
+.env
