@@ -1,0 +1,1 @@
+{"timestamp": "2026-04-07T14:31:25.572420+03:00", "process": "EXAM_SERVER", "stream": "stderr", "level": "error", "component": "runtime_logging", "event_type": "logging_started", "tag": "log", "message": "[LOG] Writing runtime log to logs\\EXAM_SERVER_20260407_143125.jsonl", "checksum": "92ebe23c454f8a57903c657d92fe851b2a407afd350498d7cbc9f5c5563e7670"}

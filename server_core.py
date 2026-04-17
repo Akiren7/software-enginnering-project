@@ -5,6 +5,7 @@ import json
 import time
 import os     
 from datetime import datetime
+import school_service # Yeni Mock Servisimiz
 
 from security_layer import open_secure_packet, verify_signature, hash_password, get_expected_server_token
 from instructor_auth import verify_instructor_role
@@ -16,6 +17,14 @@ import events
 # Mert'in Veritabanı Modülü
 import db_manager
 db_manager.init_db()
+
+# Örnek Oturma Düzeni (ŞUANLIK KULLANILMIYOR)
+SEATING_PLAN = {
+    "std_01": "127.0.0.1", # Lab bilgisayarı IP'si
+    "std_02": "192.168.1.11"
+}
+
+
 
 # ---------------------------------------------------------
 # EKLENDİ (ÖZELLİK 3): JSONL FORMATINDA DOSYAYA LOGLAMA
@@ -31,6 +40,19 @@ def log_event(event_type, details):
         f.write(json.dumps(log_entry) + "\n")
     db_manager.log_audit(event_type, "system", "", details, "OK")
 
+
+async def broadcast_to_exam(exam_id, action, payload):
+    """Küresel Komut Koordinasyonu: Belirli bir sınavdaki tüm aktif öğrencilere mesaj gönderir."""
+    for sid, info in active_students.items():
+        if info.get("exam_id") == exam_id and info.get("ws"):
+            try:
+                # Ahmet'in checksum'lı protokolüyle sarmalıyoruz
+                event_name = getattr(events, action.upper(), action)
+                msg = protocol.encode(event_name, payload)
+                if isinstance(msg, dict): msg = json.dumps(msg)
+                await info["ws"].send(msg)
+            except Exception as e:
+                print(f"⚠️ [SİSTEM] {sid} kullanıcısına mesaj gönderilemedi: {e}")
 # 1) HAFIZA VE DURUM YÖNETİMİ
 active_students = {}
 exam_registry = {}
@@ -40,44 +62,39 @@ dashboard_counter = 0
 async def global_timer():
     timer_tick = 0
     while True:
-        await asyncio.sleep(1) # Her 1 saniyede bir tetiklenir
+        await asyncio.sleep(1)
         timer_tick += 1
         
-        # EKLENDİ (MERT DB): Her 5 saniyede bir tüm sunucu hafızasını veritabanına yedekle (Crash Recovery)
         if timer_tick % 5 == 0:
             db_manager.save_server_state(active_students, exam_registry)
 
         for sid, info in active_students.items():
-            if info["state"] == "in_progress":
-                info["time_left"] -= 1 
+            # DÜZELTME: Sınav bitmediği sürece (kopma/ihlal dahil) süre 1'er 1'er azalır
+            if info["state"] != "completed":
+                info["time_left"] -= 1
                 
-                # EKLENDİ (ÖZELLİK 1a): Her 60 saniyede bir öğrenciye zamanı senkronize et (sync_time)
-                if info["time_left"] > 0 and info["time_left"] % 60 == 0:
+                # Her 60 saniyede bir BİREYSEL senkronizasyon (Sadece aktif olanlara)
+                if info["state"] == "in_progress" and info["time_left"] > 0 and info["time_left"] % 60 == 0:
                     if info.get("ws"):
                         try:
-                            # QWEN FIX: Ahmet'in checksum'lı protokolüyle gönderiyoruz
                             event_name = getattr(events, "SYNC_TIME", "sync_time")
                             sync_msg = protocol.encode(event_name, {"time_left_seconds": info["time_left"]})
                             if isinstance(sync_msg, dict): sync_msg = json.dumps(sync_msg)
                             await info["ws"].send(sync_msg)
-                        except Exception as e:
-                            pass
+                        except: pass
 
                 if info["time_left"] <= 0:
                     info["state"] = "completed"
                     print(f"\n✅ [BİTTİ] {sid} numaralı öğrencinin SÜRESİ DOLDU!")
                     log_event("exam_completed", {"student_id": sid})
                     
-                    # EKLENDİ (ÖZELLİK 1b): Süre bitince öğrencinin ekranını kitlemek için exam_end at
                     if info.get("ws"):
                         try:
-                            # QWEN FIX: Ahmet'in checksum'lı protokolüyle gönderiyoruz
                             event_name = getattr(events, "EXAM_END", "exam_end")
                             end_msg = protocol.encode(event_name, {})
                             if isinstance(end_msg, dict): end_msg = json.dumps(end_msg)
                             await info["ws"].send(end_msg)
-                        except Exception as e:
-                            pass
+                        except: pass
 
 def _map_ahmet_to_internal(payload):
     """Ahmet'in PROCESS_CATCH formatını senin risk skorlama sistemine bağlar."""
@@ -158,122 +175,107 @@ async def handle_client(websocket):
                 print(f"\n✅ [EĞİTMEN] Yeni Sınav Aktif Edildi: {exam_id}")
                 log_event("exam_registered", {"exam_id": exam_id})
                 await websocket.send(json.dumps({"status": "exam_registered"}))
+            # --- OTURUM YÖNETİMİ AKSİYONLARI ---
 
-            elif action == "resume_student": # EĞİTMENİN KOPAN ÖĞRENCİYİ AFFETME KOMUTU
-                #   FIX: Eğitmen Token Kontrolü (Doğru Kullanım)
+            elif action == "start_all_students":
+                # EĞİTMEN KOMUT KOORDİNASYONU
+                ok, err = verify_instructor_role(data, "start_exam")
+                if ok:
+                    exam_id = data["payload"]["exam_id"]
+                    # Sınava kayıtlı herkesi WAITING'den IN_PROGRESS'e çek
+                    for sid, info in active_students.items():
+                        if info["exam_id"] == exam_id and info["state"] == "waiting_for_start":
+                            info["state"] = "in_progress"
+                    
+                    await broadcast_to_exam(exam_id, "exam_started_ack", {"status": "success"})
+                    print(f"🚀 [SİSTEM] {exam_id} sınavı TÜM ÖĞRENCİLER için başlatıldı!")
+            elif action == "resume_student":
                 ok, err = verify_instructor_role(data, "resume_student")
                 if not ok:
-                    print(f"🚫 [GÜVENLİK İHLALİ] Öğrenci affetme yetkisi reddedildi! Sebep: {err}")
-                    await websocket.send(json.dumps({"status": "error", "message": f"Sınava devam etmek için gözetmen onayı gereklidir! {err}"}))
+                    await websocket.send(json.dumps({"status": "error", "message": f"Yetkisiz işlem! {err}"}))
                     continue
                     
                 hedef_id = data.get("student_id")
                 if hedef_id in active_students:
                     active_students[hedef_id]["state"] = "in_progress"
-                    print(f"\n🟢 [EĞİTMEN KOMUTU] {hedef_id} numaralı öğrenci affedildi ve DEVAM ETTİRİLDİ.")
+                    
+                    # DÜZELTME: Öğrencinin kilitli ekranını açması için sinyal gönder
+                    target_ws = active_students[hedef_id].get("ws")
+                    if target_ws:
+                        try:
+                            await target_ws.send(json.dumps({"action": "exam_resumed", "status": "success"}))
+                        except: pass
+                        
+                    print(f"\n🟢 [EĞİTMEN KOMUTU] {hedef_id} affedildi ve kilit açma sinyali gönderildi.")
                     log_event("student_resumed", {"student_id": hedef_id})
+                    await websocket.send(json.dumps({"status": "success", "message": f"{hedef_id} affedildi."}))
 
-            elif action == "request_start_exam": # ÖĞRENCİNİN SINAVA BAŞLAMA TALEBİ
+            elif action == "request_start_exam": # ÖĞRENCİNİN SINAVA GİRİŞ VE DOĞRULAMA TALEBİ
+                student_id = data.get("student_id")
+                password = data.get("password", "")
+                exam_id = data.get("exam_id")
 
-                # --- GERİ EKLENDİ: ESKİ SÜRÜM KONTROLÜ ---
-                eski_surum_mu = False
+                # 1. ADIM: HOCANIN İSTEDİĞİ CATS/ORION DOĞRULAMASI
+                success, name_or_err = school_service.verify_user(student_id, password)
+                if not success:
+                    await websocket.send(json.dumps({"status": "error", "message": f"CATS Hatası: {name_or_err}"}))
+                    continue
+
+                # 2. ADIM: GÜVENLİK VE İMZA KONTROLÜ (Engin & Naz)
                 client_sig = data.pop("auth_signature", None)
+                eski_surum_mu = False
                 if client_sig:
                     msg_str = json.dumps(data, sort_keys=True)
                     if not verify_signature(msg_str, client_sig):
-                        await websocket.send(json.dumps({"status": "error", "message": "Güvenlik İhlali: Mesaj İmzası Geçersiz!"}))
+                        await websocket.send(json.dumps({"status": "error", "message": "Güvenlik İhlali: İmzalı Paket Hatası!"}))
                         continue
                 else:
-                    print("\n⚠️ [UYARI] Eski sürüm bir istemci bağlanıyor (İmza Yok). Güvenlik seviyesi: DÜŞÜK")
                     eski_surum_mu = True
-                # ----------------------------------------
 
-                client_sig = data.pop("auth_signature", None)
-                if client_sig:
-                    msg_str = json.dumps(data, sort_keys=True)
-                    if not verify_signature(msg_str, client_sig):
-                        await websocket.send(json.dumps({"status": "error", "message": "Güvenlik İhlali: Mesaj İmzası Geçersiz!"}))
-                        continue
-                
-                login_id = data.get("login_id", "")
-                gelen_sifre = data.get("password", "")
-                gelen_hash = data.get("password_hash", "")
-                credential_sig = data.get("credential_sig", "")
-
-                if login_id and gelen_hash and credential_sig:
-                    beklenen_imza_metni = f"{login_id}:{gelen_hash}"
-                    if not verify_signature(beklenen_imza_metni, credential_sig):
-                        await websocket.send(json.dumps({"status": "error", "message": "Güvenlik İhlali: Kimlik İmzası Geçersiz!"}))
-                        continue
-                if gelen_sifre and gelen_hash:
-                    if hash_password(gelen_sifre) != gelen_hash:
-                        await websocket.send(json.dumps({"status": "error", "message": "Hatalı Şifre!"}))
-                        continue
-
-                student_id = data["student_id"]
-                exam_id = data["exam_id"]
+                # 3. ADIM: OTURUM YÖNETİMİ VE CRASH RECOVERY
+                session_token = get_expected_server_token(student_id)
                 
                 if student_id in active_students:
-                    mevcut_durum = active_students[student_id]["state"]
-                    mevcut_sinav = active_students[student_id]["exam_id"]
-
-                    if mevcut_durum == "in_progress":
-                        #  CRASH RECOVERY: Sunucu çöktüyse ws None olur, öğrenciyi kurtar!
-                        if active_students[student_id].get("ws") is None:
-                            active_students[student_id]["ws"] = websocket
-                            print(f"\n🔄 [CRASH RECOVERY] Sunucu çökmesi sonrası {student_id} başarıyla kurtarıldı!")
-                            log_event("crash_recovery_reconnect", {"student_id": student_id})
-                            await websocket.send(json.dumps({
-                            "action": "exam_started_ack", "status": "success", 
-                            "session_token": active_students[student_id]["session_token"],
-                            "reconnected": True, "time_left_seconds": active_students[student_id]["time_left"],
-                            # YENİ EKLENEN SATIR
-                            "warning": "⚠️ DİKKAT: Eski sürüm (şifresiz) bir istemci kullanıyorsunuz!" if eski_surum_mu else None
-                        }))
-                            continue
-                        else:
-                            await websocket.send(json.dumps({"status": "error", "message": f"HATA: Zaten '{mevcut_sinav}' sınavındasınız!"}))
-                            continue
-                    
-                    elif mevcut_durum in ["disconnected_paused", "violation_paused"] and mevcut_sinav != exam_id:
-                        await websocket.send(json.dumps({"status": "error", "message": f"HATA: Önce '{mevcut_sinav}' sınavını bitirmelisiniz!"}))
-                        continue
-
-                    elif mevcut_durum == "disconnected_paused" and mevcut_sinav == exam_id:
+                    # Sunucu çöktüyse veya koptuysa geri bağla (CRASH RECOVERY)
+                    if active_students[student_id].get("ws") is None:
                         active_students[student_id]["ws"] = websocket
-                        active_students[student_id]["state"] = "in_progress"
-                        print(f"\n🔄 [BİLGİ] {student_id} bağlantısı koptuğu yerden tekrar içeri alındı!")
-                        log_event("student_reconnected", {"student_id": student_id})
+                        # Eğer zaten in_progress ise direkt devam ettir, değilse bekleme odasına al
+                        yeni_state = active_students[student_id]["state"] 
+                        print(f"🔄 [RECOVERY] {student_id} oturumu kurtarıldı. Durum: {yeni_state}")
                         await websocket.send(json.dumps({
-                            "action": "exam_started_ack", "status": "success", "session_token": active_students[student_id]["session_token"],
-                            "reconnected": True, "time_left_seconds": active_students[student_id]["time_left"]
+                            "action": "exam_started_ack", "status": "success", 
+                            "session_token": session_token, "reconnected": True,
+                            "time_left_seconds": active_students[student_id]["time_left"]
                         }))
                         continue
-                        
-                    elif mevcut_durum == "violation_paused" and mevcut_sinav == exam_id:
-                        active_students[student_id]["ws"] = websocket 
-                        print(f"\n🚫 [GÜVENLİK] {student_id} ihlalden dondurulduğu için yeniden bağlanma isteği REDDEDİLDİ.")
-                        await websocket.send(json.dumps({"status": "error", "message": "Sınavınız güvenlik ihlali sebebiyle durdurulmuştur."}))
-                        continue
-                
-                duration_mins = 40
-                session_token = get_expected_server_token(student_id)
 
+                # 4. ADIM: YENİ OTURUM OLUŞTURMA (Bekleme Odası)
                 active_students[student_id] = {
-                    "ws": websocket, "state": "in_progress", "session_token": session_token,
-                    "exam_id": exam_id, "time_left": duration_mins * 60,
-                    "login_id": login_id, "password_hash": gelen_hash, "credential_sig": credential_sig
+                    "ws": websocket, "state": "waiting_for_start", "exam_id": exam_id,
+                    "time_left": 2400, "session_token": session_token, "last_seq": 0,
+                    "total_risk_score": 0, "login_name": name_or_err
                 }
-                db_manager.record_student_connection(student_id, exam_id, session_token, login_id)
-
-                log_event("exam_started", {"student_id": student_id, "exam_id": exam_id})
-                log_event("exam_started", {"student_id": student_id, "exam_id": exam_id})
+                
+                print(f"🎓 [OTURUM] {name_or_err} ({student_id}) CATS üzerinden doğrulandı. BEKLEME ODASINA ALINDI.")
+                log_event("student_authenticated", {"student_id": student_id, "name": name_or_err})
+                
                 await websocket.send(json.dumps({
-                    "action": "exam_started_ack", "status": "success", "session_token": session_token,
-                    "reconnected": False, "total_duration_minutes": duration_mins,
-                    # YENİ EKLENEN SATIR
-                    "warning": "⚠️ DİKKAT: Eski sürüm (şifresiz) bir istemci kullanıyorsunuz!" if eski_surum_mu else None
+                    "action": "auth_success", "status": "success", 
+                    "message": f"Hoş geldin {name_or_err}. Eğitmen sınavı başlatana kadar lütfen bekleyiniz.",
+                    "session_token": session_token,
+                    "warning": "⚠️ DİKKAT: Eski sürüm istemci!" if eski_surum_mu else None
                 }))
+
+            elif action == "change_duration": # EĞİTMENİN SÜREYİ UZATMA KOMUTU
+                ok, err = verify_instructor_role(data, "change_duration")
+                if ok:
+                    extra_mins = data["payload"].get("extra_minutes", 5)
+                    target_exam = data["payload"].get("exam_id")
+                    for sid, info in active_students.items():
+                        if info["exam_id"] == target_exam:
+                            info["time_left"] += (extra_mins * 60)
+                    print(f"⏰ [EĞİTMEN] {target_exam} sınav süresi {extra_mins} dk uzatıldı.")
+                    await broadcast_to_exam(target_exam, "duration_updated", {"added_minutes": extra_mins})
 
             elif action == "status_update":
                 student_id = data.get("student_id")
@@ -282,6 +284,17 @@ async def handle_client(websocket):
                 if student_id in active_students and active_students[student_id]["session_token"] == token:
                     security_data = data.get("security", {})
                     
+                    # --- YENİ (ENGİN ENTEGRASYONU): Integrity Fields ---
+                    seq_no = data.get("seq", 0)
+                    session_id = data.get("session_id", "unknown")
+                    is_buffered = data.get("buffered", False)
+                    queued_at = data.get("queued_at", datetime.now().isoformat())
+                    
+                    # Sıra numarası takibi (opsiyonel: atlanan paket var mı kontrolü eklenebilir)
+                    active_students[student_id]["last_seq"] = seq_no
+                    active_students[student_id]["client_session_id"] = session_id
+                    # ---------------------------------------------------
+
                     if security_data.get("violation_alert") == True:
                         active_students[student_id]["state"] = "violation_paused"
                         v_type = security_data.get("violation_type", "Bilinmeyen İhlal")
@@ -305,29 +318,35 @@ async def handle_client(websocket):
                             
                         active_students[student_id]["total_risk_score"] = yeni_skor
                         active_students[student_id]["risk_level"] = risk_level
-                        zaman = datetime.now().isoformat()
+                        
+                        # Gecikmiş paketler için asıl oluşturulma zamanını (queued_at) kullan
+                        zaman = queued_at if is_buffered else datetime.now().isoformat()
                         
                         active_students[student_id]["last_violation"] = {
                             "type": v_type, "window": aktif_pencere, "time": zaman,
-                            "risk_score": yeni_skor, "risk_level": risk_level
+                            "risk_score": yeni_skor, "risk_level": risk_level,
+                            "buffered": is_buffered # Loglarda gecikmeli paket olduğunu belirt
                         }
                         
                         log_event("violation_alert", {
                             "student_id": student_id, "score": yeni_skor, 
-                            "level": risk_level, "type": v_type, "window": aktif_pencere
+                            "level": risk_level, "type": v_type, "window": aktif_pencere,
+                            "seq": seq_no, "buffered": is_buffered, "queued_at": queued_at
                         })
                         
-                        # ESKİ DETAYLI GÖRÜNÜMÜ GERİ GETİRİYORUZ
-                        print(f"\n🚨 [ALARM] {student_id} ihlal yaptı! Sınav donduruldu.")
+                        # Konsol çıktısını güncelle
+                        buffer_str = "[GECİKMELİ/BUFFERED PAKET] " if is_buffered else ""
+                        print(f"\n🚨 [ALARM] {buffer_str}{student_id} ihlal yaptı! Sınav donduruldu.")
                         print(f"   ↳ 🧠 [ANALİZ] Güvenlik Skoru: %{yeni_skor} - Seviye: {risk_level}")
                         print(f"   ↳ Sebep: {v_type} | Pencere: {aktif_pencere}")
-                        print(f"   ↳ Arka Plan: {', '.join(acik_uygulamalar)}")
+                        print(f"   ↳ Sıra No: {seq_no} | Oluşturulma: {queued_at}")
                         
-                        # Mert'in veritabanı modülüne kopyayı (violation) yolla
+                        # Mert'in veritabanı modülüne kopyayı yolla (Eksiksiz)
                         db_manager.save_violation_to_db(student_id, v_type, aktif_pencere, yeni_skor)
                         db_manager.record_monitoring_event(student_id, "VIOLATION", {
                             "type": v_type, "window": aktif_pencere,
-                            "apps": acik_uygulamalar, "score": yeni_skor
+                            "apps": acik_uygulamalar, "score": yeni_skor,
+                            "seq": seq_no, "buffered": is_buffered, "session_id": session_id
                         }, "CRITICAL")
  
             elif action == "get_dashboard_data":
@@ -347,6 +366,8 @@ async def handle_client(websocket):
                 }))
                 print(f"\r📊 [SİSTEM] Dashboard güncellendi. (İstek: {dashboard_counter})", end="", flush=True)
 
+            
+                
     except Exception as e:
         # Bağlantı zorla kesildiğinde çıkan gereksiz ağ hatalarını filtrele
         hata_str = str(e).lower()

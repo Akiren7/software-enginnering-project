@@ -1,0 +1,44 @@
+{
+    "active_students": {
+        "std_01": {
+            "state": "violation_paused",
+            "session_token": "token_std_01_gizli",
+            "exam_id": "exam_001",
+            "time_left": 2400,
+            "login_id": "student1",
+            "password_hash": "7d379179248d56a5c0215f61338efa01367a238d52a99888fb975b0297fc17eb",
+            "credential_sig": "d40149b69cbeee8a35b39273cbc1c93e5657cf6650ec67495e698c4269fc788a",
+            "last_msg_time": 1775545108.4194698,
+            "total_risk_score": 100,
+            "risk_level": "KRİTİK",
+            "last_violation": {
+                "type": "FOCUS_LOST",
+                "window": "● server.ipynb - SOFTWARE ENGİNEERİNG PROJECT - NETWORK-BASED LABORATORY EXAM SYSTEM - Visual Studio Code",
+                "time": "2026-04-07T09:38:29.519934",
+                "risk_score": 100,
+                "risk_level": "KRİTİK"
+            }
+        },
+        "2300007951": {
+            "state": "disconnected_paused",
+            "session_token": "token_2300007951_gizli",
+            "exam_id": "Applied Deep Learning",
+            "time_left": 1403,
+            "login_id": "",
+            "password_hash": "",
+            "credential_sig": "",
+            "last_msg_time": 1775544947.4985034
+        },
+        "2300005396": {
+            "state": "in_progress",
+            "session_token": "token_2300005396_gizli",
+            "exam_id": "Applied Deep Learning",
+            "time_left": 144,
+            "login_id": "",
+            "password_hash": "",
+            "credential_sig": "",
+            "last_msg_time": 1775544823.7282038
+        }
+    },
+    "exam_registry": {}
+}

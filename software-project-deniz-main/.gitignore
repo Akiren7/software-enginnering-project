@@ -1,0 +1,6 @@
+*.pyc
+*.DS_Store
+data/
+*.pyc
+/custommodules/__pycache__
+/report

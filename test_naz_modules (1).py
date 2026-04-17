@@ -14,6 +14,7 @@ Gereksinimler:
 import json
 import sys
 import time
+import cryptography
 
 # ── Renk kodları (terminal çıktısı için) ──────────────────────────────────
 GREEN  = "\033[92m"

@@ -1,21 +1,24 @@
 """
 monitor_loop.py
 ===============
-YOUR MODULE — Monitoring Loop (WebSocket version)
-Integrates with network_sender.py which now uses WebSocket.
+YOUR MODULE — Monitoring Loop
+Updated to work with the reliable delivery version of NetworkSender.
 
-No changes to the loop logic — only the sender changed.
+Changes from previous version:
+  - send_heartbeat() now returns DeliveryStatus — loop logs the result
+  - buffer_size() is checked every cycle and printed if non-zero
+  - disconnect() flushes the buffer before closing (handled inside sender)
 """
 
 import threading
 import time
 
 from payload_builder import PayloadBuilder
-from network_sender  import NetworkSender
+from network_sender  import NetworkSender, DeliveryStatus
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
 HEARTBEAT_INTERVAL = 5
-STUDENT_ID         = "std_01"
+STUDENT_ID         = "2300005352"
 STUDENT_NAME       = "Alice K."
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -23,8 +26,8 @@ STUDENT_NAME       = "Alice K."
 class MonitorLoop:
     """
     Runs the periodic monitoring cycle in a background thread.
-    Calls NetworkSender.send_heartbeat() every HEARTBEAT_INTERVAL seconds.
-    The server handles violation detection on its side based on the flags.
+    Calls NetworkSender.send_heartbeat() every HEARTBEAT_INTERVAL seconds
+    and logs the DeliveryStatus returned by the sender.
     """
 
     def __init__(self, exam_state, sender: NetworkSender = None):
@@ -39,10 +42,6 @@ class MonitorLoop:
         if self._running:
             return
 
-        # ── SERVER TEAMMATE INTEGRATION POINT ────────────────────────────
-        # register() connects via WebSocket and sends "request_start_exam"
-        # Server must be running before this is called.
-        # ─────────────────────────────────────────────────────────────────
         registered = self._sender.register()
         if not registered:
             print("[MONITOR] Warning: Could not register with server. Running in offline mode.")
@@ -53,7 +52,10 @@ class MonitorLoop:
         print("[MONITOR] Monitoring loop started.")
 
     def stop(self):
-        """Stop the loop and close connection."""
+        """
+        Stop the loop.
+        NetworkSender.disconnect() will flush any buffered packets first.
+        """
         self._running = False
         self._sender.disconnect()
         print("[MONITOR] Monitoring loop stopped.")
@@ -63,12 +65,10 @@ class MonitorLoop:
     def _loop(self):
         while self._running:
 
-            # Wait until exam is active
             if not self._exam_state.is_active():
                 time.sleep(1)
                 continue
 
-            # Build payload from your existing modules
             try:
                 payload = self._builder.build()
             except Exception as exc:
@@ -76,11 +76,17 @@ class MonitorLoop:
                 time.sleep(HEARTBEAT_INTERVAL)
                 continue
 
-            # Log locally
             self._log(payload)
 
-            # Send to server — server handles violation_paused state
-            self._sender.send_heartbeat(payload)
+            # send_heartbeat now returns a DeliveryStatus
+            status = self._sender.send_heartbeat(payload)
+
+            # Log delivery outcome and buffer status
+            if status == DeliveryStatus.BUFFERED:
+                print(f"[MONITOR] Packet buffered. "
+                      f"Queue size: {self._sender.buffer_size()}")
+            elif status == DeliveryStatus.DROPPED:
+                print(f"[MONITOR] ⚠ Packet DROPPED — buffer full.")
 
             time.sleep(HEARTBEAT_INTERVAL)
 
@@ -98,18 +104,20 @@ class MonitorLoop:
 # ── Stubs for testing ─────────────────────────────────────────────────────
 
 class _StubSender:
-    """Fake sender — prints instead of sending. Use when server is not ready."""
+    """Fake sender — prints instead of sending."""
     def register(self):
-        print("[STUB] register() called → returning fake session_token")
+        print("[STUB] register() → OK")
         return True
     def send_heartbeat(self, payload):
         import json
         print(f"[STUB] send_heartbeat:\n{json.dumps(payload, indent=2)}\n")
+        return DeliveryStatus.SENT
+    def buffer_size(self): return 0
     def disconnect(self):
-        print("[STUB] disconnect() called")
+        print("[STUB] disconnect()")
 
 class _StubExamState:
-    """Fake exam state — exam always active."""
+    """Exam always active."""
     def is_active(self) -> bool:
         return True
 
@@ -118,30 +126,24 @@ class _StubExamState:
 
 if __name__ == "__main__":
     from network_sender import NetworkSender
-    from auth_client import AuthClient # ADDED: Naz's Auth Module
+    from auth_client import AuthClient
 
     print("=" * 55)
-    print("  MONITOR LOOP — test mode (stubs)")
+    print("  MONITOR LOOP — live mode")
     print("  Press Ctrl+C to stop")
     print("=" * 55)
 
-    # ── Switch to real modules when teammates are ready ───────────────────
-    #
-    #   from exam_state import ExamState     # exam control teammate
+    # ── Switch to real ExamState when teammate's module is ready: ─────────
+    #   from exam_state import ExamState
     #   exam_state = ExamState()
-    #   loop = MonitorLoop(exam_state=exam_state)  # uses real NetworkSender
-    #
-    # To test with real server but stub exam state:
-    #   loop = MonitorLoop(exam_state=_StubExamState())
-    #
     # ─────────────────────────────────────────────────────────────────────
 
-    # PERFORM AUTHENTICATION: Prepare valid credentials before starting loop
-    auth = AuthClient()
+    auth        = AuthClient()
     auth_result = auth.authenticate("student1", "secret1")
+    sender      = NetworkSender(auth_result=auth_result)
+    exam_state  = _StubExamState()
 
-    # START SENDER: Pass the authenticated credentials to the NetworkSender
-    loop = MonitorLoop(exam_state=_StubExamState(), sender=NetworkSender(auth_result=auth_result))
+    loop = MonitorLoop(exam_state=exam_state, sender=sender)
     loop.start()
 
     try:

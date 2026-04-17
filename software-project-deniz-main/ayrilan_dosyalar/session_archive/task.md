@@ -1,0 +1,23 @@
+# Server-Client Architecture (Python)
+
+- [x] Core: shared.py, server.py, client.py, discovery.py, requirements.txt
+- [x] Named Protocol: events.py (centralized message constructors)
+- [x] Screen Replays (custommodules/replay_recorder.py)
+  - [x] Automatic background buffering (last 60s)
+  - [x] Default: ENABLED (overridable via `--no-record`)
+  - [x] Targeted trigger: `/savescreen <client_id>` via server console
+- [x] UUID Everything & Nested Storage
+  - [x] Full UUIDs for server-side client identification
+  - [x] Client generates session UUID on startup
+  - [x] IDs Synchronized: Recording folders and Server/Client IDs match
+  - [x] Replay recorder uses nested UUID folders (`<uuid>/recordings/cache/`, `<uuid>/recordings/replays/`)
+- [x] Robustness
+  - [x] Duplicate server ID detection
+  - [x] Port-in-use graceful handling
+  - [x] CLI argument validation
+- [x] Documentation & Templates
+  - [x] New event integration template
+  - [x] Multi-client demo batch script
+- [x] Multi-Identifier Tracking
+  - [x] Server tracks Full UUID, Short ID (8-char), and IP Address
+  - [x] Console commands support targeting by any identifier

@@ -23,12 +23,12 @@ EXAM_APP_KEYWORD = "python"      # the main platform that the exam will be held,
 
 BANNED_APPS = [
     # Browsers
-    "chrome", "firefox", "chromium", "opera", "brave", "edge",
+    #"chrome", "firefox", "chromium", "opera", "brave", "edge",
     # Code editors / IDEs
-    "code", "vscode", "sublime_text", "pycharm", "intellij",
-    "notepad++", "atom", "vim", "nano",
+    #"code", "vscode", "sublime_text", "pycharm", "intellij",
+    #"notepad++", "atom", "vim", "nano",
     # Messaging
-    "telegram", "discord", "whatsapp", "slack", "teams",
+    #"telegram", "discord", "whatsapp", "slack", "teams",
     # Shells / terminals
     #"cmd", "powershell", "bash", "terminal", "konsole", "gnome-terminal",
 ]
