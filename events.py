@@ -5,7 +5,10 @@ Event names:  events.PING, events.ECHO, etc. (for listeners)
 Constructors: events.ping(msg), events.echo(data, t), etc. (for senders)
 """
 
-import protocol
+try:
+    from . import protocol
+except ImportError:
+    import protocol
 
 
 # -- Event name constants (use these in if/elif listeners) -----------------
@@ -57,6 +60,30 @@ def client_info(computer_name: str) -> str:
     """Client sends identifying machine metadata to the server."""
     return protocol.encode(CLIENT_INFO, {"computer_name": computer_name})
 
+EXAM_POLICY = "exam_policy"
+
+def exam_policy(policy: dict) -> str:
+    """Server sends the current client-enforced exam policy."""
+    return protocol.encode(EXAM_POLICY, policy)
+
+POLICY_UPDATE = "policy_update"
+
+def policy_update(policy: dict) -> str:
+    """Server pushes an updated client-enforced exam policy."""
+    return protocol.encode(POLICY_UPDATE, policy)
+
+POLICY_APPLIED = "policy_applied"
+
+def policy_applied(policy_version: str, *, ok: bool = True, reason: str = "") -> str:
+    """Client acknowledges that a policy version was applied or rejected."""
+    payload = {
+        "policy_version": policy_version,
+        "ok": bool(ok),
+    }
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(POLICY_APPLIED, payload)
+
 SAVESCREEN = "savescreen"
 
 def savescreen() -> str:
@@ -73,9 +100,72 @@ def start_exam() -> str:
 
 SYNC_TIME = "sync_time"
 
-def sync_time(remaining_seconds: int) -> str:
+def sync_time(
+    remaining_seconds: int,
+    *,
+    timer_state: str = "running",
+    pause_source: str = "",
+    reason: str = "",
+) -> str:
     """Server tells client the exact remaining seconds."""
-    return protocol.encode(SYNC_TIME, {"remaining_seconds": remaining_seconds})
+    payload = {
+        "remaining_seconds": remaining_seconds,
+        "timer_state": timer_state,
+    }
+    if pause_source:
+        payload["pause_source"] = pause_source
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(SYNC_TIME, payload)
+
+SESSION_STATE = "session_state"
+
+def session_state(
+    state: str,
+    remaining_seconds: int,
+    *,
+    reason: str = "",
+    resume_allowed: bool = False,
+    policy_version: str = "",
+    pause_source: str = "",
+) -> str:
+    """Server sends the authoritative session state for connect/reconnect flow."""
+    payload = {
+        "state": state,
+        "remaining_seconds": int(remaining_seconds),
+        "resume_allowed": bool(resume_allowed),
+    }
+    if reason:
+        payload["reason"] = reason
+    if policy_version:
+        payload["policy_version"] = policy_version
+    if pause_source:
+        payload["pause_source"] = pause_source
+    return protocol.encode(SESSION_STATE, payload)
+
+PAUSE_EXAM = "pause_exam"
+
+def pause_exam(remaining_seconds: int, *, source: str = "admin", reason: str = "") -> str:
+    """Server pauses a client's exam timer while monitoring continues."""
+    payload = {
+        "remaining_seconds": remaining_seconds,
+        "source": source,
+    }
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(PAUSE_EXAM, payload)
+
+RESUME_EXAM = "resume_exam"
+
+def resume_exam(remaining_seconds: int, *, source: str = "admin", reason: str = "") -> str:
+    """Server resumes a previously paused exam timer."""
+    payload = {
+        "remaining_seconds": remaining_seconds,
+        "source": source,
+    }
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(RESUME_EXAM, payload)
 
 EXAM_END = "exam_end"
 
@@ -112,6 +202,74 @@ def process_catch(matches: list[dict], blacklist_version: str) -> str:
             "blacklist_version": blacklist_version,
         },
     )
+
+INCIDENT_REPORT = "incident_report"
+
+def incident_report(payload: dict) -> str:
+    """Client reports an incident lifecycle event and any related metadata."""
+    return protocol.encode(INCIDENT_REPORT, payload)
+
+INCIDENT_RECEIVED = "incident_received"
+
+def incident_received(
+    incident_id: str,
+    *,
+    stored: bool = True,
+    artifact_path: str = "",
+    reason: str = "",
+) -> str:
+    """Server acknowledges an incident report."""
+    payload = {
+        "incident_id": incident_id,
+        "stored": bool(stored),
+    }
+    if artifact_path:
+        payload["artifact_path"] = artifact_path
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(INCIDENT_RECEIVED, payload)
+
+KILL_PROCESS = "kill_process"
+
+def kill_process(
+    pid: int,
+    *,
+    incident_id: str = "",
+    process_name: str = "",
+    reason: str = "",
+) -> str:
+    """Server requests a client to terminate a specific process ID."""
+    payload = {"pid": int(pid)}
+    if incident_id:
+        payload["incident_id"] = incident_id
+    if process_name:
+        payload["process_name"] = process_name
+    if reason:
+        payload["reason"] = reason
+    return protocol.encode(KILL_PROCESS, payload)
+
+KILL_PROCESS_RESULT = "kill_process_result"
+
+def kill_process_result(
+    pid: int,
+    *,
+    incident_id: str = "",
+    ok: bool = False,
+    process_name: str = "",
+    message: str = "",
+) -> str:
+    """Client reports the outcome of a kill-process command."""
+    payload = {
+        "pid": int(pid),
+        "ok": bool(ok),
+    }
+    if incident_id:
+        payload["incident_id"] = incident_id
+    if process_name:
+        payload["process_name"] = process_name
+    if message:
+        payload["message"] = message
+    return protocol.encode(KILL_PROCESS_RESULT, payload)
 
 FINISH_EXAM = "finish_exam"
 

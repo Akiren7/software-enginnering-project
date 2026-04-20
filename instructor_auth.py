@@ -60,13 +60,17 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "resume_student",
         "register_exam",
         "get_dashboard_data",
+        "start_exam",        # YENİ EKLENDİ: Sınavı başlatma yetkisi
+        "change_duration",   # YENİ EKLENDİ: Süre uzatma yetkisi
     ],
     "admin": [
         "resume_student",
         "register_exam",
         "get_dashboard_data",
-        "force_stop_exam",      # gelecekte eklenebilir
-        "ban_student",          # gelecekte eklenebilir
+        "start_exam",        # YENİ EKLENDİ
+        "change_duration",   # YENİ EKLENDİ
+        "force_stop_exam",  # gelecekte eklenebilir
+        "ban_student",      # gelecekte eklenebilir
     ],
 }
 

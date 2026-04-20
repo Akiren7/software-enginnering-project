@@ -1,13 +1,23 @@
 """
-monitor_loop.py
-===============
-YOUR MODULE — Monitoring Loop
-Updated to work with the reliable delivery version of NetworkSender.
+monitor_loop.py — FINAL
+=======================
+Monitoring loop compatible with network_sender.py v4.
 
-Changes from previous version:
-  - send_heartbeat() now returns DeliveryStatus — loop logs the result
-  - buffer_size() is checked every cycle and printed if non-zero
-  - disconnect() flushes the buffer before closing (handled inside sender)
+How it works
+------------
+1. start() → register() with server (CATS auth)
+2. Loop waits in "waiting room" until sender.is_exam_active() becomes True
+   (server pushes exam_started_ack when instructor starts the exam)
+3. Once active: build payload every 5s, send via sender.send_heartbeat()
+4. stop() → flush buffer, disconnect
+
+Key fix from previous version
+------------------------------
+- Removed exam_state parameter entirely. Exam active/passive state is now
+  driven by sender.is_exam_active() which the NetworkSender sets when it
+  receives exam_started_ack from the server. No more _StubExamState needed.
+- Main block now uses real NetworkSender + AuthClient, not stubs.
+  This is what actually sends data to the server.
 """
 
 import threading
@@ -15,60 +25,76 @@ import time
 
 from payload_builder import PayloadBuilder
 from network_sender  import NetworkSender, DeliveryStatus
+from auth_client     import AuthClient
 
 # ── CONFIG ────────────────────────────────────────────────────────────────
 HEARTBEAT_INTERVAL = 5
-STUDENT_ID         = "2300005352"
+STUDENT_ID         = "std_01"
 STUDENT_NAME       = "Alice K."
 # ──────────────────────────────────────────────────────────────────────────
 
 
 class MonitorLoop:
     """
-    Runs the periodic monitoring cycle in a background thread.
-    Calls NetworkSender.send_heartbeat() every HEARTBEAT_INTERVAL seconds
-    and logs the DeliveryStatus returned by the sender.
+    Monitoring loop. No exam_state parameter — state comes from sender.
+
+    Usage:
+        auth        = AuthClient()
+        auth_result = auth.authenticate("student_number", "cats_password")
+        sender      = NetworkSender(auth_result=auth_result)
+        loop        = MonitorLoop(sender=sender)
+        loop.start()
     """
 
-    def __init__(self, exam_state, sender: NetworkSender = None):
-        self._exam_state = exam_state
-        self._sender     = sender or NetworkSender()
-        self._builder    = PayloadBuilder(STUDENT_ID, STUDENT_NAME)
-        self._running    = False
-        self._thread     = None
+    def __init__(self, sender: NetworkSender = None):
+        self._sender  = sender or NetworkSender()
+        self._builder = PayloadBuilder(STUDENT_ID, STUDENT_NAME)
+        self._running = False
+        self._thread  = None
 
     def start(self):
-        """Register with server then start the monitoring loop."""
         if self._running:
             return
 
         registered = self._sender.register()
+        if registered:
+        # YENİ: PayloadBuilder içindeki ismi sunucudan gelenle güncelle
+            self._builder.student_name = self._sender.student_real_name
+        
         if not registered:
-            print("[MONITOR] Warning: Could not register with server. Running in offline mode.")
+            print("[MONITOR] Could not register. Will retry when loop runs.")
 
         self._running = True
         self._thread  = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("[MONITOR] Monitoring loop started.")
+        print("[MONITOR] Loop started.")
 
     def stop(self):
-        """
-        Stop the loop.
-        NetworkSender.disconnect() will flush any buffered packets first.
-        """
         self._running = False
         self._sender.disconnect()
-        print("[MONITOR] Monitoring loop stopped.")
+        print("[MONITOR] Loop stopped.")
 
     # ── Internal loop ─────────────────────────────────────────────────────
 
     def _loop(self):
+        waiting_logged = False
+
         while self._running:
 
-            if not self._exam_state.is_active():
+            # ── Waiting room: exam not started yet ────────────────────────
+            if not self._sender.is_exam_active():
+                if not waiting_logged:
+                    print("[MONITOR] ⏳ Waiting room — monitoring paused until instructor starts exam.")
+                    waiting_logged = True
                 time.sleep(1)
                 continue
 
+            # Exam just became active
+            if waiting_logged:
+                print("[MONITOR] ▶ Exam active. Sending heartbeats.")
+                waiting_logged = False
+
+            # ── Build and send payload ────────────────────────────────────
             try:
                 payload = self._builder.build()
             except Exception as exc:
@@ -78,72 +104,53 @@ class MonitorLoop:
 
             self._log(payload)
 
-            # send_heartbeat now returns a DeliveryStatus
             status = self._sender.send_heartbeat(payload)
 
-            # Log delivery outcome and buffer status
             if status == DeliveryStatus.BUFFERED:
-                print(f"[MONITOR] Packet buffered. "
-                      f"Queue size: {self._sender.buffer_size()}")
+                print(f"[MONITOR] Offline — buffered. Queue: {self._sender.buffer_size()}")
             elif status == DeliveryStatus.DROPPED:
-                print(f"[MONITOR] ⚠ Packet DROPPED — buffer full.")
+                print("[MONITOR] ⚠ Buffer full — packet dropped.")
+            elif status == DeliveryStatus.WAITING:
+                # Exam paused mid-session (violation freeze or exam ended)
+                print("[MONITOR] ⏸ Exam paused or ended.")
+                waiting_logged = False   # will log again when it resumes
 
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _log(self, payload: dict):
-        flags    = payload["flags"]
+        flags    = payload.get("flags", [])
         flag_str = ", ".join(flags) if flags else "clean"
         print(
-            f"[HB] {payload['student_name']} | "
-            f"window='{payload['active_window'][:40]}' | "
-            f"idle={payload['idle_seconds']:.0f}s | "
+            f"[HB] {payload.get('student_name','?')} | "
+            f"window='{payload.get('active_window','')[:40]}' | "
+            f"idle={payload.get('idle_seconds', 0):.0f}s | "
             f"flags=[{flag_str}]"
         )
-
-
-# ── Stubs for testing ─────────────────────────────────────────────────────
-
-class _StubSender:
-    """Fake sender — prints instead of sending."""
-    def register(self):
-        print("[STUB] register() → OK")
-        return True
-    def send_heartbeat(self, payload):
-        import json
-        print(f"[STUB] send_heartbeat:\n{json.dumps(payload, indent=2)}\n")
-        return DeliveryStatus.SENT
-    def buffer_size(self): return 0
-    def disconnect(self):
-        print("[STUB] disconnect()")
-
-class _StubExamState:
-    """Exam always active."""
-    def is_active(self) -> bool:
-        return True
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from network_sender import NetworkSender
-    from auth_client import AuthClient
-
     print("=" * 55)
     print("  MONITOR LOOP — live mode")
-    print("  Press Ctrl+C to stop")
+    print("  Ctrl+C to stop")
     print("=" * 55)
 
-    # ── Switch to real ExamState when teammate's module is ready: ─────────
-    #   from exam_state import ExamState
-    #   exam_state = ExamState()
+    # ── Credentials ───────────────────────────────────────────────────────
+    # Change these to your real CATS student number and password
+    CATS_ID       = "2300007951"       # ← your student number
+    CATS_PASSWORD = "1476BaEnder-"      # ← your CATS password
     # ─────────────────────────────────────────────────────────────────────
 
     auth        = AuthClient()
-    auth_result = auth.authenticate("student1", "secret1")
-    sender      = NetworkSender(auth_result=auth_result)
-    exam_state  = _StubExamState()
+    auth_result = auth.authenticate(CATS_ID, CATS_PASSWORD)
 
-    loop = MonitorLoop(exam_state=exam_state, sender=sender)
+    if not auth_result.success:
+        print(f"[AUTH] Failed: {auth_result.error}")
+        exit(1)
+
+    sender = NetworkSender(auth_result=auth_result)
+    loop   = MonitorLoop(sender=sender)
     loop.start()
 
     try:

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 
 DECODE_ERROR = "__decode_error__"
+INTEGRITY_FIELDS = {"seq", "session_id", "buffered", "queued_at"}
 
 
 def _canonical_message(event: str, data: dict) -> str:
@@ -26,6 +27,20 @@ def _canonical_message(event: str, data: dict) -> str:
 def _message_checksum(event: str, data: dict) -> str:
     payload = _canonical_message(event, data).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _without_integrity_fields(data: dict) -> dict:
+    """Return payload data without transport reliability metadata."""
+    return {key: value for key, value in data.items() if key not in INTEGRITY_FIELDS}
+
+
+def _merge_top_level_integrity(msg: dict, data: dict) -> dict:
+    """Preserve known top-level reliability fields for downstream handlers."""
+    merged = dict(data)
+    for key in INTEGRITY_FIELDS:
+        if key in msg and key not in merged:
+            merged[key] = msg[key]
+    return merged
 
 
 def encode(event: str, data: dict | None = None) -> str:
@@ -57,10 +72,14 @@ def decode(raw: str) -> tuple[str, dict]:
         return DECODE_ERROR, {"reason": "missing message checksum"}
 
     expected_checksum = _message_checksum(event, data)
-    if checksum != expected_checksum:
-        return DECODE_ERROR, {"reason": "message checksum mismatch"}
+    if checksum == expected_checksum:
+        return event, _merge_top_level_integrity(msg, data)
 
-    return event, data
+    stripped_data = _without_integrity_fields(data)
+    if stripped_data != data and checksum == _message_checksum(event, stripped_data):
+        return event, _merge_top_level_integrity(msg, data)
+
+    return DECODE_ERROR, {"reason": "message checksum mismatch"}
 
 
 def now_iso() -> str:

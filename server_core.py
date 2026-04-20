@@ -9,6 +9,9 @@ import school_service # Yeni Mock Servisimiz
 
 from security_layer import open_secure_packet, verify_signature, hash_password, get_expected_server_token
 from instructor_auth import verify_instructor_role
+import sys
+from pathlib import Path
+from runtime_logging import setup_runtime_logging, install_asyncio_exception_logging
 
 # Ahmet'in protokol modülleri
 import protocol
@@ -30,14 +33,12 @@ SEATING_PLAN = {
 # EKLENDİ (ÖZELLİK 3): JSONL FORMATINDA DOSYAYA LOGLAMA
 # ---------------------------------------------------------
 def log_event(event_type, details):
-    """Ahmet'in fikri: Olayları konsol haricinde kalıcı dosyaya kaydeder."""
-    log_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "event_type": event_type,
-        "details": details
-    }
-    with open("sinav_raporu_merkezi.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(log_entry) + "\n")
+    """
+    Ahmet'in runtime_logging modülü her şeyi yakaladığı için 
+    burada sadece anlamlı bir print yapmamız yeterli.
+    """
+    print(f"[{event_type.upper()}] {json.dumps(details, ensure_ascii=False)}")
+    # Mert'in veritabanına kritik olayları yazmaya devam ediyoruz
     db_manager.log_audit(event_type, "system", "", details, "OK")
 
 
@@ -69,8 +70,9 @@ async def global_timer():
             db_manager.save_server_state(active_students, exam_registry)
 
         for sid, info in active_students.items():
-            # DÜZELTME: Sınav bitmediği sürece (kopma/ihlal dahil) süre 1'er 1'er azalır
-            if info["state"] != "completed":
+            # DÜZELTME: Sadece sınav başladıysa (in_progress) süre azalır.
+            # Öğrenci koptuğunda, ihlal yaptığında veya beklemedeyken SÜRE DURUR!
+            if info["state"] == "in_progress":
                 info["time_left"] -= 1
                 
                 # Her 60 saniyede bir BİREYSEL senkronizasyon (Sadece aktif olanlara)
@@ -157,8 +159,14 @@ async def handle_client(websocket):
             # RATE LIMITING
             if student_id and student_id in active_students:
                 now = time.time()
-                if now - active_students[student_id].get("last_msg_time", 0) < 0.5:
+                
+                # Paketin buffer'dan gelip gelmediğini kontrol et
+                is_buffered = data.get("buffered", False)
+                
+                # Eğer paket buffered DEĞİLSE ve 0.5 saniyeden hızlı geldiyse reddet
+                if not is_buffered and (now - active_students[student_id].get("last_msg_time", 0) < 0.5):
                     continue 
+                    
                 active_students[student_id]["last_msg_time"] = now
 
             if action == "register_exam": # EĞİTMENİN YENİ SINAV KAYIT KOMUTU
@@ -214,6 +222,25 @@ async def handle_client(websocket):
                 student_id = data.get("student_id")
                 password = data.get("password", "")
                 exam_id = data.get("exam_id")
+                client_ip = websocket.remote_address[0] # Bağlanan cihazın IP'si
+
+                # ------------------------------------------------------------------
+                # 🚨 ANTI-CHEAT: AYNI BİLGİSAYARDAN ÇİFT GİRİŞİ ENGELLEME
+                # ------------------------------------------------------------------
+                already_connected_from_ip = False
+                for sid, info in active_students.items():
+                    # Eğer başka bir öğrenci ID'si ile bu IP'den zaten aktif bir bağlantı varsa
+                    if sid != student_id and info.get("ws") and info["ws"].remote_address[0] == client_ip:
+                        already_connected_from_ip = True
+                        break
+                
+                if already_connected_from_ip:
+                    print(f"🚨 [GÜVENLİK İHLALİ] {client_ip} IP adresinden 2. bir giriş denemesi reddedildi!")
+                    await websocket.send(json.dumps({
+                        "status": "error", 
+                        "message": "Güvenlik İhlali: Bu bilgisayardan zaten aktif bir sınav oturumu bulunuyor! Uygulamayı birden fazla kez açamazsınız."
+                    }))
+                    continue # İşlemi reddet ve döngüye devam et
 
                 # 1. ADIM: HOCANIN İSTEDİĞİ CATS/ORION DOĞRULAMASI
                 success, name_or_err = school_service.verify_user(student_id, password)
@@ -260,10 +287,12 @@ async def handle_client(websocket):
                 log_event("student_authenticated", {"student_id": student_id, "name": name_or_err})
                 
                 await websocket.send(json.dumps({
-                    "action": "auth_success", "status": "success", 
+                    "action": "auth_success", 
+                    "status": "success", 
+                    "login_name": name_or_err,  # İsim dinamikleşsin diye eklendi
                     "message": f"Hoş geldin {name_or_err}. Eğitmen sınavı başlatana kadar lütfen bekleyiniz.",
                     "session_token": session_token,
-                    "warning": "⚠️ DİKKAT: Eski sürüm istemci!" if eski_surum_mu else None
+                    "warning": "⚠️ DİKKAT: Eski sürüm istemci!" if eski_surum_mu else None  # Geri eklendi!
                 }))
 
             elif action == "change_duration": # EĞİTMENİN SÜREYİ UZATMA KOMUTU
@@ -276,6 +305,23 @@ async def handle_client(websocket):
                             info["time_left"] += (extra_mins * 60)
                     print(f"⏰ [EĞİTMEN] {target_exam} sınav süresi {extra_mins} dk uzatıldı.")
                     await broadcast_to_exam(target_exam, "duration_updated", {"added_minutes": extra_mins})
+
+            elif action == "force_stop_exam":
+                ok, err = verify_instructor_role(data, "force_stop_exam")
+                if ok:
+                    target_exam = data["payload"].get("exam_id")
+                    for sid, info in active_students.items():
+                        if info.get("exam_id") == target_exam:
+                            info["state"] = "completed"
+                            info["time_left"] = 0
+                print(f"🛑 [EĞİTMEN] {target_exam} zorla durduruldu.")
+                await websocket.send(json.dumps({"status": "success", "message": "Sınav durduruldu."}))
+
+            # 2. Mevcut Sınavları Listeleme (Öğrencinin ComboBox'ı için)
+            elif action == "get_active_exams":
+    #            Sadece kayıtlı ve henüz bitmemiş sınavları dön
+                available = [{"id": k, "name": v["name"]} for k, v in exam_registry.items()]
+                await websocket.send(json.dumps({"action": "active_exams_list", "exams": available}))    
 
             elif action == "status_update":
                 student_id = data.get("student_id")
@@ -296,7 +342,7 @@ async def handle_client(websocket):
                     # ---------------------------------------------------
 
                     if security_data.get("violation_alert") == True:
-                        active_students[student_id]["state"] = "violation_paused"
+                        active_students[student_id]["state"] = "İhlal Yaptı - Donduruldu"
                         v_type = security_data.get("violation_type", "Bilinmeyen İhlal")
                         details = security_data.get("details", {})
                         aktif_pencere = details.get("active_window", "Bilinmiyor")
@@ -355,10 +401,16 @@ async def handle_client(websocket):
                 for sid, info in active_students.items():
                     if info["state"] == "completed": continue
                     time_str = f"{info.get('time_left', 0)//60:02d}:{info.get('time_left', 0)%60:02d}"
+                    
+                    # YENİ EKLENDİ: Son ihlal penceresini eğitmen uygulamasına gönder
+                    last_violation = info.get("last_violation", {})
+                    last_window = last_violation.get("window", "-")
+
                     formatted_students[sid] = {
                         "state": info["state"], "exam_id": info.get("exam_id"), 
                         "time_left_formatted": time_str, "risk_score": info.get("total_risk_score", 0),
-                        "risk_level": info.get("risk_level", "TEMİZ")
+                        "risk_level": info.get("risk_level", "TEMİZ"),
+                        "last_window": last_window  # <- Bu satır olmadan panelde pencere görünmez
                     }
 
                 await websocket.send(json.dumps({
