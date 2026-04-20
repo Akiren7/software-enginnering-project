@@ -1,0 +1,93 @@
+{
+  "summary": {
+    "total_students": 8,
+    "active_students": 4,
+    "alerts": 5,
+    "remaining_time": "38 min"
+  },
+  "students": [
+    {
+      "name": "Ali Yılmaz",
+      "status": "Active",
+      "duration": 45,
+      "window": "ExamApp",
+      "alerts": 1
+    },
+    {
+      "name": "Ayşe Demir",
+      "status": "Idle",
+      "duration": 20,
+      "window": "None",
+      "alerts": 0
+    },
+    {
+      "name": "Mehmet Kaya",
+      "status": "Disconnected",
+      "duration": 10,
+      "window": "None",
+      "alerts": 1
+    },
+    {
+      "name": "Zeynep Arslan",
+      "status": "Active",
+      "duration": 52,
+      "window": "ExamApp",
+      "alerts": 0
+    },
+    {
+      "name": "Can Aydın",
+      "status": "Idle",
+      "duration": 18,
+      "window": "Chrome",
+      "alerts": 1
+    },
+    {
+      "name": "Elif Koç",
+      "status": "Active",
+      "duration": 47,
+      "window": "ExamApp",
+      "alerts": 0
+    },
+    {
+      "name": "Berk Yıldız",
+      "status": "Disconnected",
+      "duration": 12,
+      "window": "None",
+      "alerts": 1
+    },
+    {
+      "name": "Ceren Şahin",
+      "status": "Active",
+      "duration": 41,
+      "window": "Calculator",
+      "alerts": 1
+    }
+  ],
+  "alerts": [
+    {
+      "message": "Calculator opened by Ceren Şahin",
+      "severity": "warning",
+      "time": "14:20"
+    },
+    {
+      "message": "Student disconnected: Mehmet Kaya",
+      "severity": "critical",
+      "time": "14:21"
+    },
+    {
+      "message": "Chrome opened by Can Aydın",
+      "severity": "warning",
+      "time": "14:23"
+    },
+    {
+      "message": "Student disconnected: Berk Yıldız",
+      "severity": "critical",
+      "time": "14:25"
+    },
+    {
+      "message": "No activity detected for Ayşe Demir",
+      "severity": "info",
+      "time": "14:27"
+    }
+  ]
+}
